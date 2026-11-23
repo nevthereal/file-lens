@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+VERSION="${VERSION:-1.0}"
+BUILD="${BUILD:-1}"
 swift scripts/make-icon.swift Assets/FileLens.iconset
 iconutil -c icns Assets/FileLens.iconset -o Assets/FileLens.icns
 swift build -c release
@@ -9,7 +11,7 @@ APP="$PWD/dist/File Lens.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/FileLens" "$APP/Contents/MacOS/FileLens"
 cp Assets/FileLens.icns "$APP/Contents/Resources/FileLens.icns"
-cat > "$APP/Contents/Info.plist" <<'PLIST'
+cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -19,8 +21,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>File Lens</string>
 <key>CFBundleIconFile</key><string>FileLens</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0</string>
-<key>CFBundleVersion</key><string>1</string>
+<key>CFBundleShortVersionString</key><string>${VERSION}</string>
+<key>CFBundleVersion</key><string>${BUILD}</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPrincipalClass</key><string>NSApplication</string>

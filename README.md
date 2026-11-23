@@ -1,10 +1,46 @@
 # File Lens
 
-A minimal black-and-white macOS disk viewer with monospaced type, built with SwiftUI and AppKit. No web view, dependencies, account, or network access.
+A fast, native macOS disk-space viewer. Every file and folder is a bubble whose area matches its size on disk, so you can see at a glance what's using your space and drill into it.
 
-## Run
+Built with SwiftUI and AppKit. No dependencies, no account, no network access, no telemetry.
 
-Open `/Applications/File Lens.app` (or `dist/File Lens.app` after a build). If Full Disk Access is already on, it starts indexing the startup drive immediately; otherwise it shows setup first. The sheet shows whether access is detected, opens the right Settings page, and has **Relaunch** (access applies to newly started processes). Rebuilding this locally signed app may require removing and re-adding it in Full Disk Access.
+<!-- Add a screenshot: save it as docs/screenshot.png and uncomment the line below. -->
+<!-- ![File Lens](docs/screenshot.png) -->
+
+## Features
+
+- **Bubble map** of any drive or folder, with area proportional to size and colors by file type
+- **Fast, parallel indexing** using bulk directory reads on several threads; browse while it runs
+- **Instant reopen**: totals from the last index show right away while a fresh one runs
+- **Accurate progress** bar and time remaining
+- **Safe cleanup**: Move to Trash with confirmation, with system and home folders protected
+- Quick Look, details panel, external drives, keyboard navigation
+
+## Requirements
+
+macOS 14 Sonoma or later. Apple silicon or Intel.
+
+## Install
+
+Download the latest `File-Lens-vX.Y.zip` from [Releases](../../releases), unzip it, and move **File Lens.app** to `/Applications`.
+
+The app is ad-hoc signed, not notarized, so macOS blocks it the first time. Either right-click the app → **Open** → **Open**, or run:
+
+```sh
+xattr -dr com.apple.quarantine "/Applications/File Lens.app"
+```
+
+### Full Disk Access
+
+To measure protected folders (Mail, Messages, other apps' containers, and so on), File Lens needs Full Disk Access. The app asks on first launch if it doesn't have it:
+
+1. Click **Open settings** (System Settings → Privacy & Security → Full Disk Access).
+2. Click **+**, select File Lens, and turn it on.
+3. Click **Relaunch**.
+
+Without access, File Lens still works. Unreadable items are left out of totals, and the count of them is shown at the bottom of the window. macOS may ask again after you update to a new build.
+
+## Usage
 
 ### Indexing
 
@@ -30,23 +66,33 @@ Open `/Applications/File Lens.app` (or `dist/File Lens.app` after a build). If F
 
 **Move to Trash…** always asks for confirmation and shows the size. Top-level drive folders, system folders (`/System`, `/usr`, …), user home folders and standard home folders (Documents, Library, …) are protected. Totals are adjusted in place, without re-indexing. It uses the native macOS Trash and never deletes permanently.
 
-## Build
+## Build from source
 
-Requires macOS 14+ and the Xcode command line tools with Swift 6+.
+Requires the Xcode command line tools with Swift 6 or later.
 
 ```sh
-./scripts/build-app.sh
+git clone <this repo>
+cd file-lens
+./scripts/build-app.sh            # builds dist/File Lens.app
 open "dist/File Lens.app"
-
-# Install the app
-ditto "dist/File Lens.app" "/Applications/File Lens.app"
-open "/Applications/File Lens.app"
 ```
 
-The build script renders the monochrome lens icon at every macOS icon size, makes a release app bundle, and signs it locally. The editable icon source is `scripts/make-icon.swift`. You can also open `Package.swift` in Xcode or run `swift run` for development.
+Install with `ditto "dist/File Lens.app" "/Applications/File Lens.app"`. During development you can run `swift run`, or open `Package.swift` in Xcode.
 
 ```sh
 swift test
 ```
 
 Tests cover the bulk directory reader against FileManager, recursive totals, symlink and hard-link handling, focus and pause, in-place Trash accounting, saved indexes and stale totals, protected folders, grouped bubbles, file categories, navigation during indexing, Full Disk Access detection paths, progress/time estimates, drive selection and bubble packing.
+
+### Releasing
+
+Push a tag like `v1.1`. The release workflow runs the tests, builds the app with that version, and attaches a zip to a new GitHub release.
+
+## Privacy
+
+File Lens reads file metadata only (names, types, sizes, dates). It never reads file contents and never connects to the network. The only data it saves is folder size totals, in `~/Library/Caches/local.filelens.app`. Delete that folder to clear them.
+
+## License
+
+[MIT](LICENSE)
