@@ -3,6 +3,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 VERSION="${VERSION:-1.0}"
 BUILD="${BUILD:-1}"
+# Code signing identity. "-" is ad-hoc; set SIGN_IDENTITY to your own certificate
+# (see `security find-identity -v -p codesigning`) to keep Full Disk Access across rebuilds.
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 swift scripts/make-icon.swift Assets/FileLens.iconset
 iconutil -c icns Assets/FileLens.iconset -o Assets/FileLens.icns
 swift build -c release
@@ -28,5 +31,5 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 <key>NSPrincipalClass</key><string>NSApplication</string>
 </dict></plist>
 PLIST
-codesign --force --sign - "$APP"
+codesign --force --sign "$SIGN_IDENTITY" "$APP"
 echo "Built: $APP"

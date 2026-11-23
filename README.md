@@ -22,13 +22,36 @@ macOS 14 Sonoma or later. Apple silicon or Intel.
 
 ## Install
 
-Download the latest `File-Lens-vX.Y.zip` from [Releases](../../releases), unzip it, and move **File Lens.app** to `/Applications`.
+### Build it yourself (recommended)
 
-The app is ad-hoc signed, not notarized, so macOS blocks it the first time. Either right-click the app → **Open** → **Open**, or run:
+Requires macOS 14+ and the Xcode command line tools with Swift 6 or later.
+
+```sh
+git clone https://github.com/nevthereal/file-lens.git
+cd file-lens
+./scripts/build-app.sh
+ditto "dist/File Lens.app" "/Applications/File Lens.app"
+open "/Applications/File Lens.app"
+```
+
+An app you build yourself isn't quarantined, so it opens without Gatekeeper warnings.
+
+By default the app is signed ad-hoc. macOS ties Full Disk Access to the signature, which changes with every ad-hoc build, so you may have to re-enable access after rebuilding. To avoid that, sign with your own certificate (a free Apple Development certificate from Xcode works):
+
+```sh
+security find-identity -v -p codesigning          # list your identities
+SIGN_IDENTITY="Apple Development: Your Name (TEAMID)" ./scripts/build-app.sh
+```
+
+### Prebuilt download
+
+[Releases](../../releases) include a zip of the app. It is **not signed or notarized**, so macOS blocks it the first time you open it. After the first attempt, go to **System Settings → Privacy & Security** and click **Open Anyway**, or remove the quarantine flag:
 
 ```sh
 xattr -dr com.apple.quarantine "/Applications/File Lens.app"
 ```
+
+Only do this if you trust the download; building from source lets you see exactly what you run.
 
 ### Full Disk Access
 
@@ -66,18 +89,9 @@ Without access, File Lens still works. Unreadable items are left out of totals, 
 
 **Move to Trash…** always asks for confirmation and shows the size. Top-level drive folders, system folders (`/System`, `/usr`, …), user home folders and standard home folders (Documents, Library, …) are protected. Totals are adjusted in place, without re-indexing. It uses the native macOS Trash and never deletes permanently.
 
-## Build from source
+## Development
 
-Requires the Xcode command line tools with Swift 6 or later.
-
-```sh
-git clone <this repo>
-cd file-lens
-./scripts/build-app.sh            # builds dist/File Lens.app
-open "dist/File Lens.app"
-```
-
-Install with `ditto "dist/File Lens.app" "/Applications/File Lens.app"`. During development you can run `swift run`, or open `Package.swift` in Xcode.
+`swift run` starts the app directly, or open `Package.swift` in Xcode. `./scripts/build-app.sh` makes the app bundle in `dist/`; `VERSION`, `BUILD` and `SIGN_IDENTITY` environment variables set its version and signature.
 
 ```sh
 swift test
