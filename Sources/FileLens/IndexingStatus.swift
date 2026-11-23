@@ -28,6 +28,14 @@ struct IndexingStatus {
         if phase == .complete { fraction = 1 }
     }
 
+    /// Continues a paused index without counting the pause as elapsed time.
+    mutating func resume(now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
+        guard phase == .paused, let startedAt, let stoppedAt else { return }
+        self.startedAt = startedAt + (now - stoppedAt)
+        self.stoppedAt = nil
+        phase = .running
+    }
+
     func elapsed(at now: TimeInterval) -> TimeInterval {
         guard let startedAt else { return 0 }
         return max(0, (stoppedAt ?? now) - startedAt)

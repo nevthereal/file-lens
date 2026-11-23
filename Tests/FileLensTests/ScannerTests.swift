@@ -4,127 +4,166 @@ import XCTest
 final class ScannerTests: XCTestCase {
     private func fixture() throws -> URL {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        try FileManager.default.createDirectory(at: root.appendingPathComponent("nested"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("nested/deeper"), withIntermediateDirectories: true)
         try Data(repeating: 42, count: 8192).write(to: root.appendingPathComponent("small.bin"))
         try Data(repeating: 51, count: 65536).write(to: root.appendingPathComponent("nested/large.bin"))
+        try Data(repeating: 7, count: 20000).write(to: root.appendingPathComponent("nested/deeper/odd.bin"))
         return root
     }
 
-    func testListingIsShallowAndFolderSizesAreUnknown() throws {
-        let root = try fixture()
-        defer { try? FileManager.default.removeItem(at: root) }
-        let listing = try DirectoryScanner.list(root, scanRoot: root, cache: MeasurementCache())
-        let nested = try XCTUnwrap(listing.children.first { $0.name == "nested" })
-        XCTAssertEqual(nested.state, .pending)
-        XCTAssertEqual(nested.sizeText, "—")
-        XCTAssertTrue(nested.children.isEmpty)
-        XCTAssertEqual(nested.bytes, 0)
-        XCTAssertEqual(listing.children.first { $0.name == "small.bin" }?.state, .complete)
+    private func allocated(_ url: URL) -> Int64 {
+        let values = try? url.resourceValues(forKeys: [.totalFileAllocatedSizeKey, .isDirectoryKey])
+        return Int64(values?.totalFileAllocatedSize ?? 0)
     }
 
-    func testTotalsSymlinkSafetyAndLazyChildren() throws {
+    private func run(_ root: URL) throws -> IndexEngine {
+        let engine = IndexEngine(root: root, workers: 4)
+        engine.start()
+        XCTAssertTrue(engine.waitUntilFinished(timeout: 10))
+        return engine
+    }
+
+    func testBulkReaderMatchesFileManager() throws {
+        // A real directory with many entries of different kinds.
+        let directory = URL(fileURLWithPath: "/usr/bin")
+        let contents = DirectoryReader.withBuffer { DirectoryReader.read(directory.path, buffer: $0) }
+        XCTAssertFalse(contents.failed)
+        let urls = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        let folders = urls.filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])).map { $0.isDirectory == true && $0.isSymbolicLink != true } ?? false }
+        XCTAssertEqual(Set(contents.subdirectories), Set(folders.map(\.lastPathComponent)))
+        XCTAssertEqual(contents.entries, urls.count)
+    }
+
+    func testTotalsMatchAllocatedSizesAndSymlinksAreNotFollowed() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("nested/cycle"), withDestinationURL: root)
-        let cache = MeasurementCache()
-        let listing = try DirectoryScanner.list(root, scanRoot: root, cache: cache)
-        let result = try DirectoryScanner.measure(listing, scanRoot: root, cache: cache) { _ in }
-        XCTAssertEqual(result.unreadable, 0)
-        XCTAssertEqual(result.root.state, .complete)
-        XCTAssertEqual(result.root.fileCount, 3)
-        XCTAssertEqual(result.root.bytes, result.root.children.reduce(0) { $0 + $1.bytes })
-        let nested = try XCTUnwrap(result.root.children.first { $0.name == "nested" })
-        XCTAssertTrue(nested.children.isEmpty, "Measurement must not retain the recursive file tree")
-        XCTAssertGreaterThan(nested.bytes, result.root.children.first { $0.name == "small.bin" }!.bytes)
-        let nestedListing = try DirectoryScanner.list(nested.url, scanRoot: root, cache: cache)
-        let link = try XCTUnwrap(nestedListing.children.first { $0.name == "cycle" })
-        XCTAssertTrue(link.isSymbolicLink)
-        XCTAssertFalse(link.isDirectory)
-        XCTAssertEqual(nestedListing.bytes, nested.bytes)
-        XCTAssertEqual(nestedListing.state, .complete)
+        let engine = try run(root)
+        let files = ["small.bin", "nested/large.bin", "nested/deeper/odd.bin"].map { allocated(root.appendingPathComponent($0)) }
+        let status = try XCTUnwrap(engine.status(of: root.path))
+        XCTAssertEqual(status.state, .complete)
+        XCTAssertEqual(status.files, 4, "three files plus the symbolic link itself")
+        XCTAssertGreaterThanOrEqual(status.bytes, files.reduce(0, +))
+        XCTAssertLessThan(status.bytes, files.reduce(0, +) + 64 * 1024, "a followed cycle would multiply the total")
+        let deeper = try XCTUnwrap(engine.status(of: root.appendingPathComponent("nested/deeper").path))
+        XCTAssertEqual(deeper.bytes, files[2])
+        XCTAssertEqual(engine.progress().coverage, 1, accuracy: 0.000001)
     }
 
-    func testPartialProgressIsPublishedBeforeAFolderFinishes() throws {
+    func testHardLinksAreCountedOnce() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        let cache = MeasurementCache()
-        let listing = try DirectoryScanner.list(root, scanRoot: root, cache: cache)
-        let snapshots = SnapshotCollector()
-        let result = try DirectoryScanner.measure(listing, scanRoot: root, cache: cache, progressInterval: 0) { snapshots.append($0) }
-        XCTAssertTrue(snapshots.values.contains { $0.children.contains { $0.state == .measuring && $0.bytes > 0 } })
-        XCTAssertTrue(snapshots.values.allSatisfy { $0.total.bytes <= result.root.bytes })
-        XCTAssertEqual(snapshots.values.last?.total.bytes, result.root.bytes)
-        let fractions = snapshots.values.map(\.fraction)
-        XCTAssertEqual(fractions, fractions.sorted())
-        XCTAssertTrue(fractions.allSatisfy { (0...1).contains($0) })
-        XCTAssertEqual(fractions.last, 1)
+        let original = root.appendingPathComponent("nested/large.bin")
+        let before = try XCTUnwrap(try run(root).status(of: root.path)).bytes
+        try FileManager.default.linkItem(at: original, to: root.appendingPathComponent("hardlink.bin"))
+        let after = try XCTUnwrap(try run(root).status(of: root.path))
+        XCTAssertEqual(after.bytes, before)
+        XCTAssertEqual(after.files, 4)
     }
 
-    func testCancellationKeepsCompletedSubtreesAndDoesNotCachePartialRoot() async throws {
+    func testFocusAndPauseStillFinishWithSameTotals() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        let cache = MeasurementCache()
-        let listing = try DirectoryScanner.list(root, scanRoot: root, cache: cache)
-        let task = Task.detached {
-            try DirectoryScanner.measure(listing, scanRoot: root, cache: cache, progressInterval: 0) { update in
-                if update.children.contains(where: { $0.isDirectory && $0.state == .complete }) {
-                    withUnsafeCurrentTask { $0?.cancel() }
-                }
-            }
-        }
-        do { _ = try await task.value; XCTFail("Expected cancellation") }
-        catch is CancellationError { }
-        XCTAssertNil(cache.value(for: root))
-        let nestedURL = try XCTUnwrap(listing.children.first { $0.name == "nested" }?.url)
-        XCTAssertNotNil(cache.value(for: nestedURL))
-        let refreshed = try DirectoryScanner.list(root, scanRoot: root, cache: cache)
-        XCTAssertEqual(refreshed.children.first { $0.name == "nested" }?.state, .complete)
+        let reference = try XCTUnwrap(try run(root).status(of: root.path))
+        let engine = IndexEngine(root: root, workers: 3)
+        engine.setPaused(true)
+        engine.setFocus(root.appendingPathComponent("nested/deeper").path)
+        engine.start()
+        XCTAssertFalse(engine.waitUntilFinished(timeout: 0.2), "a paused index must not finish")
+        XCTAssertEqual(engine.progress().directoriesRead, 0)
+        engine.setPaused(false)
+        XCTAssertTrue(engine.waitUntilFinished(timeout: 10))
+        XCTAssertEqual(engine.status(of: root.path), reference)
     }
 
-    func testCachedSubtreeIsNotTraversedAgain() throws {
+    func testRemovalAdjustsAncestorsWithoutRescan() throws {
         let root = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }
-        let cache = MeasurementCache()
-        let listing = try DirectoryScanner.list(root, scanRoot: root, cache: cache)
-        let first = try DirectoryScanner.measure(listing, scanRoot: root, cache: cache) { _ in }
-        let updates = SnapshotCollector()
-        let second = try DirectoryScanner.measure(listing, scanRoot: root, cache: cache) { updates.append($0) }
-        XCTAssertEqual(first.root.bytes, second.root.bytes)
-        XCTAssertEqual(updates.values.last?.visited, listing.children.count)
+        let engine = try run(root)
+        let total = try XCTUnwrap(engine.status(of: root.path))
+        let nested = root.appendingPathComponent("nested")
+        let deeper = try XCTUnwrap(engine.status(of: nested.appendingPathComponent("deeper").path))
+        engine.remove(path: nested.appendingPathComponent("deeper").path, isDirectory: true, bytes: deeper.bytes)
+        XCTAssertNil(engine.status(of: nested.appendingPathComponent("deeper").path))
+        XCTAssertEqual(engine.status(of: root.path)?.bytes, total.bytes - deeper.bytes)
+        XCTAssertEqual(engine.status(of: root.path)?.files, total.files - deeper.files)
+        let small = allocated(root.appendingPathComponent("small.bin"))
+        engine.remove(path: root.appendingPathComponent("small.bin").path, isDirectory: false, bytes: small)
+        XCTAssertEqual(engine.status(of: root.path)?.bytes, total.bytes - deeper.bytes - small)
     }
 
-    func testEmptyFolderAndMissingRoot() throws {
+    func testEmptyAndMissingRoots() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let cache = MeasurementCache()
-        let listing = try DirectoryScanner.list(root, scanRoot: root, cache: cache)
-        let result = try DirectoryScanner.measure(listing, scanRoot: root, cache: cache) { _ in }
-        XCTAssertEqual(result.root.bytes, 0)
-        XCTAssertEqual(result.root.fileCount, 0)
-        XCTAssertEqual(result.root.state, .complete)
+        let empty = try run(root)
+        XCTAssertEqual(empty.status(of: root.path), IndexEngine.Status(bytes: 0, files: 0, unreadable: 0, state: .complete))
         let missing = root.appendingPathComponent("missing")
-        XCTAssertThrowsError(try DirectoryScanner.list(missing, scanRoot: root, cache: cache))
+        let failed = try run(missing)
+        XCTAssertEqual(failed.status(of: missing.path)?.state, .inaccessible)
+        XCTAssertThrowsError(try DirectoryScanner.list(missing, scanRoot: root))
+    }
+
+    func testListingIsShallowAndMarksPackages() throws {
+        let root = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Tool.app/Contents"), withIntermediateDirectories: true)
+        let listing = try DirectoryScanner.list(root, scanRoot: root)
+        let nested = try XCTUnwrap(listing.children.first { $0.name == "nested" })
+        XCTAssertEqual(nested.state, .pending)
+        XCTAssertTrue(nested.children.isEmpty)
+        XCTAssertTrue(nested.isBrowsable)
+        let app = try XCTUnwrap(listing.children.first { $0.name == "Tool.app" })
+        XCTAssertTrue(app.isPackage)
+        XCTAssertFalse(app.isBrowsable)
+        XCTAssertEqual(app.category, .app)
+        XCTAssertEqual(listing.children.first { $0.name == "small.bin" }?.state, .complete)
     }
 
     func testWholeDriveAvoidsDuplicateAndVirtualMounts() {
-        let root = URL(fileURLWithPath: "/")
         for path in ["/System/Volumes", "/Volumes", "/dev", "/Network", "/.vol"] {
-            XCTAssertTrue(DirectoryScanner.skipsContents(of: URL(fileURLWithPath: path), scanRoot: root))
+            XCTAssertTrue(IndexEngine.skipsContents(of: path, scanRoot: "/"))
         }
         for path in ["/Users", "/Applications", "/Library", "/System"] {
-            XCTAssertFalse(DirectoryScanner.skipsContents(of: URL(fileURLWithPath: path), scanRoot: root))
+            XCTAssertFalse(IndexEngine.skipsContents(of: path, scanRoot: "/"))
         }
-        let external = URL(fileURLWithPath: "/Volumes/External")
-        XCTAssertFalse(DirectoryScanner.skipsContents(of: external, scanRoot: external))
-        let data = URL(fileURLWithPath: "/System/Volumes/Data")
-        XCTAssertFalse(DirectoryScanner.skipsContents(of: data, scanRoot: data))
+        XCTAssertFalse(IndexEngine.skipsContents(of: "/Volumes/External", scanRoot: "/Volumes/External"))
+        XCTAssertFalse(IndexEngine.skipsContents(of: "/System/Volumes/Data", scanRoot: "/System/Volumes/Data"))
     }
-}
 
-private final class SnapshotCollector: @unchecked Sendable {
-    private let lock = NSLock()
-    private var snapshots: [ScanProgress] = []
-    func append(_ snapshot: ScanProgress) { lock.lock(); defer { lock.unlock() }; snapshots.append(snapshot) }
-    var values: [ScanProgress] { lock.lock(); defer { lock.unlock() }; return snapshots }
+    func testCategories() {
+        func category(_ name: String) -> FileCategory { FileCategory.of(url: URL(fileURLWithPath: "/x/" + name), isDirectory: false, isPackage: false) }
+        XCTAssertEqual(category("clip.mov"), .video)
+        XCTAssertEqual(category("photo.JPG"), .image)
+        XCTAssertEqual(category("song.mp3"), .audio)
+        XCTAssertEqual(category("backup.zip"), .archive)
+        XCTAssertEqual(category("main.swift"), .code)
+        XCTAssertEqual(category("report.pdf"), .document)
+        XCTAssertEqual(category("blob.qqq"), .other)
+    }
+
+    func testTrashPolicyProtectsSystemAndHomeFolders() {
+        let home = URL(fileURLWithPath: "/Users/someone")
+        for path in ["/", "/Applications", "/Users", "/Library", "/System/Library/Fonts", "/usr/local/bin",
+                     "/Users/someone", "/Users/other", "/Users/someone/Documents", "/Users/someone/Library"] {
+            XCTAssertTrue(TrashPolicy.isProtected(URL(fileURLWithPath: path), home: home), path)
+        }
+        for path in ["/Applications/Some.app", "/Users/someone/Documents/old.zip", "/Users/someone/Projects",
+                     "/Users/someone/Library/Caches/thing", "/Volumes/Archive/folder"] {
+            XCTAssertFalse(TrashPolicy.isProtected(URL(fileURLWithPath: path), home: home), path)
+        }
+    }
+
+    func testIndexStoreRoundTripAndKeepsOnlyRecent() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = IndexStore(directory: directory, keep: 2)
+        for root in ["/a", "/b", "/c"] {
+            try store.save(SavedIndex(root: root, savedAt: Date(), duration: 3, paths: [root], bytes: [10], files: [1]))
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        XCTAssertNil(store.load(root: "/a"))
+        let loaded = try XCTUnwrap(store.load(root: "/c"))
+        XCTAssertEqual(loaded.lookup()["/c"]?.bytes, 10)
+    }
 }
